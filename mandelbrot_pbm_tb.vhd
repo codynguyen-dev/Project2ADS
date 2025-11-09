@@ -1,57 +1,125 @@
-cd ~/ADHD.Projects
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use std.textio.all;
 
-# Create the compile script
-cat > compile.sh << 'EOF'
-#!/bin/bash
-set -e
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+library ads;
+use ads.ads_fixed.all;
+use ads.ads_complex_pkg.all;
 
-echo -e "${GREEN}=== Mandelbrot Project Compilation ===${NC}"
+library work;
+use work.color_data.all;
 
-VCOM="vcom -2008"
-VLIB="vlib"
+entity mandelbrot_pbm_tb is
+end entity;
 
-if [ "$1" == "clean" ]; then
-    echo -e "${YELLOW}Cleaning...${NC}"
-    rm -rf work ads vga *.wlf transcript vsim.wlf mandelbrot_output.ppm
-    echo -e "${GREEN}Clean complete!${NC}"
-    exit 0
-fi
+architecture tb of mandelbrot_pbm_tb is
+    constant WIDTH  : integer := 64;
+    constant HEIGHT : integer := 48;
+    constant MAX_ITER : natural := 16;
 
-echo -e "${YELLOW}Creating libraries...${NC}"
-$VLIB ads 2>/dev/null || true
-$VLIB vga 2>/dev/null || true
-$VLIB work 2>/dev/null || true
+    signal clk   : std_logic := '0';
+    signal reset : std_logic := '1';
 
-echo -e "${YELLOW}Compiling ads library...${NC}"
-$VCOM -work ads ads_fixed.vhd
-$VCOM -work ads ads_complex.vhd
+    signal c_val     : ads_complex;
+    signal c_valid   : boolean := false;
+    signal iter_out  : natural range 0 to MAX_ITER := 0;
+    signal iter_valid: boolean := false;
 
-echo -e "${YELLOW}Compiling vga library...${NC}"
-$VCOM -work vga vga_data.vhd
-$VCOM -work vga vga_fsm.vhd
+    signal color_out : rgb_color;
+    signal color_valid : boolean := false;
 
-echo -e "${YELLOW}Compiling work library...${NC}"
-$VCOM -work work color_data.vhd
-$VCOM -work work coordinate_mapper.vhd
-$VCOM -work work mandelbrot_stage.vhd
-$VCOM -work work mandelbrot_pipeline.vhd
-$VCOM -work work color_mapper.vhd
-$VCOM -work work ADSProj2CIAOTopLevel.vhd
+    file pbm_file : text open write_mode is "out_mandelbrot_64x48.pbm";
 
-echo -e "${GREEN}Compilation successful!${NC}"
+    component mandelbrot_pipeline
+        generic ( max_iterations : natural );
+        port (
+            clock      : in  std_logic;
+            reset      : in  std_logic;
+            c_in       : in  ads_complex;
+            c_valid    : in  boolean;
+            iter_out   : out natural range 0 to max_iterations;
+            iter_valid : out boolean
+        );
+    end component;
 
-if [ "$1" == "sim" ]; then
-    echo -e "${YELLOW}Compiling testbench...${NC}"
-    $VCOM -work work mandelbrot_pbm_tb.vhd
-    echo -e "${YELLOW}Running simulation (this will take a while)...${NC}"
-    vsim -c -do "run -all; quit" mandelbrot_pbm_tb
-    if [ -f "mandelbrot_output.ppm" ]; then
-        echo -e "${GREEN}Image generated: mandelbrot_output.ppm${NC}"
-    fi
-fi
-EOF
+    component color_mapper
+        generic ( max_iterations : natural );
+        port (
+            clock       : in  std_logic;
+            reset       : in  std_logic;
+            iter_count  : in  natural range 0 to max_iterations;
+            iter_valid  : in  boolean;
+            color_out   : out rgb_color;
+            color_valid : out boolean;
+            palette_sel : in  natural range 0 to 3
+        );
+    end component;
 
-chmod +x compile.sh
+begin
+    clk <= not clk after 10 ns;
+
+    dut_pipeline: mandelbrot_pipeline
+        generic map ( max_iterations => MAX_ITER )
+        port map (
+            clock      => clk,
+            reset      => reset,
+            c_in       => c_val,
+            c_valid    => c_valid,
+            iter_out   => iter_out,
+            iter_valid => iter_valid
+        );
+
+    dut_color: color_mapper
+        generic map ( max_iterations => MAX_ITER )
+        port map (
+            clock       => clk,
+            reset       => reset,
+            iter_count  => iter_out,
+            iter_valid  => iter_valid,
+            color_out   => color_out,
+            color_valid => color_valid,
+            palette_sel => 0
+        );
+
+    process
+        variable L : line;
+        variable x, y : integer;
+        variable r_scaled : integer;
+        variable tmp_c : ads_complex;
+    begin
+        wait for 100 ns;
+        reset <= '0';
+        wait for 100 ns;
+
+        write(L, string'("P1"));
+        writeline(pbm_file, L);
+        write(L, string'(integer'image(WIDTH) & " " & integer'image(HEIGHT)));
+        writeline(pbm_file, L);
+
+        for y in 0 to HEIGHT - 1 loop
+            for x in 0 to WIDTH - 1 loop
+                tmp_c.re := to_ads_sfixed(-2.0 + 3.0 * real(x) / real(WIDTH));
+                tmp_c.im := to_ads_sfixed(-1.5 + 3.0 * real(y) / real(HEIGHT));
+                c_val <= tmp_c;
+                c_valid <= true;
+                wait for 20 ns;
+                c_valid <= false;
+
+                wait until iter_valid = true;
+                r_scaled := color_out.red;
+
+                if r_scaled > 7 then
+                    write(L, string'("1 "));
+                else
+                    write(L, string'("0 "));
+                end if;
+            end loop;
+            writeline(pbm_file, L);
+        end loop;
+
+        wait for 100 ns;
+        report "Mandelbrot PBM image written to out_mandelbrot_64x48.pbm";
+        wait;
+    end process;
+end architecture;
